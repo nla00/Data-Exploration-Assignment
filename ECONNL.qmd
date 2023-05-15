@@ -1,0 +1,118 @@
+---
+title: "Data Exploration Project"
+echo: TRUE
+format: docx
+editor: visual
+---
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(rio)
+library(fixest)
+library(lubridate)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(vtable)
+```
+
+##### Reading in the Google Trends data
+
+```{r}
+df <- list.files(pattern = "trends_up_to*", full.names = TRUE)
+data <- import_list(df,rbind = TRUE, fill = TRUE )
+```
+
+##### Aggregating the Google Trends data
+
+```{r}
+data <- data %>% 
+  mutate(week = str_sub(monthorweek, start = 1, end = 10)) %>% 
+  mutate(week = ymd(week)) %>% 
+  mutate(month = floor_date(week, unit = "month")) %>%
+  group_by(schname, keyword) %>%
+  mutate(stdize_index = (index - mean(index))/sd(index)) 
+```
+
+##### Reading in the Scorecard data
+
+```{r}
+score <- import("Most+Recent+Cohorts+(Scorecard+Elements).csv")
+idname <- import("id_name_link.csv")
+```
+
+##### Merge in the Scorecard data
+
+```{r}
+idname <- idname %>%
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n == 1)
+names(score)[names(score) == "UNITID"] <- "unitid"
+link1 <- inner_join( data,idname, by = "schname")
+finalgg <- inner_join(link1, score, by = "unitid")
+```
+
+##### The Final Data: **Predominantly grant bachelor\'s degrees**
+
+```{r}
+bachelors <- finalgg %>%
+  filter(PREDDEG == 3)
+bachelors <- bachelors%>%
+  group_by(schname, monthorweek) %>%
+  mutate(indexweekly = mean(index)) %>%
+  na.omit()
+```
+
+```{r}
+bachelors$`md_earn_wne_p10-REPORTED-EARNINGS` <- as.numeric(bachelors$`md_earn_wne_p10-REPORTED-EARNINGS`)
+vtable(bachelors, lush = TRUE, factor.limit = 9, char.values = TRUE)
+```
+
+**Define \"high-earning\" and \"low-earning\" colleges**
+
+```{r}
+averageincome <- mean(na.omit(bachelors$`md_earn_wne_p10-REPORTED-EARNINGS`))
+sdincome <- sd(na.omit(bachelors$`md_earn_wne_p10-REPORTED-EARNINGS`))
+highincome <- averageincome + sdincome
+lowincome <- averageincome - sdincome
+```
+
+```{r}
+bachelors <- bachelors %>%
+  mutate(Income = ifelse(`md_earn_wne_p10-REPORTED-EARNINGS` >= averageincome, "High", "Low")) %>%
+  mutate(income1 = case_when(
+    `md_earn_wne_p10-REPORTED-EARNINGS` >= highincome ~ "High",
+    `md_earn_wne_p10-REPORTED-EARNINGS` <= lowincome ~ "Low",
+    TRUE ~ "Average" 
+  ))
+bachelors <- bachelors %>%
+  select(unitid, schname, keyword, week, `md_earn_wne_p10-REPORTED-EARNINGS`, Income, stdize_index)
+
+```
+
+```{r}
+bachelors <- bachelors %>%
+  select(unitid, schname, keyword, week, Income, `md_earn_wne_p10-REPORTED-EARNINGS`, stdize_index)
+
+bachelors <- bachelors %>%
+  mutate(post_treat_inc = `md_earn_wne_p10-REPORTED-EARNINGS` >= highincome, post_treatment = week >= as.Date("2015-09-12"))
+bachelors <- drop_na(bachelors)
+
+```
+
+```{r}
+reg_model <- feols( stdize_index~income1 * post_treatment, data = bachelors)
+etable(reg_model)
+
+```
+
+```{r}
+ggplot(bachelors, aes(week, stdize_index, color = Income)) +
+  stat_summary(geom = 'line') +
+  labs(title = 'Search index between high and low earning universities post- and pre-treatment', x = 'Year', y = 'Standardized Index') +
+  geom_vline(xintercept = as.Date ("2015-09-12")) +
+  theme_minimal() + theme(legend.position = "bottom")
+
+```
